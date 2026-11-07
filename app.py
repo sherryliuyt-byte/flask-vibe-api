@@ -1,94 +1,86 @@
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
-from flask import Flask, jsonify, request
+from dotenv import load_dotenv
+from flask import Flask, current_app, jsonify
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import make_url
 from werkzeug.exceptions import HTTPException
 
-
-app = Flask(__name__)
-app.json.ensure_ascii = False
-
-tasks = [
-    {
-        "id": 1,
-        "title": "範例任務",
-        "description": "這是一筆記憶體中的模擬任務。",
-    }
-]
+from extensions import db
 
 
-def json_response(status, message, data, http_status):
+def json_response(code, message, data):
     return jsonify(
         {
-            "status": status,
+            "code": code,
             "message": message,
             "data": data,
         }
-    ), http_status
+    ), code
 
 
-@app.errorhandler(HTTPException)
-def handle_http_exception(error):
-    http_status = error.code or 500
-    message = {
-        400: "請求格式錯誤。",
-        404: "找不到指定資源。",
-        405: "不支援此 HTTP 方法。",
-    }.get(http_status, error.description)
+def create_app():
+    project_dir = Path(__file__).resolve().parent
+    load_dotenv(project_dir / ".env")
 
-    return json_response("error", message, None, http_status)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Set it in the environment or project .env file."
+        )
+
+    database_uri = make_url(database_url)
+    if database_uri.drivername in {"postgres", "postgresql"}:
+        database_url = database_uri.set(
+            drivername="postgresql+psycopg2"
+        ).render_as_string(hide_password=False)
+
+    app = Flask(__name__)
+    app.json.ensure_ascii = False
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(error):
+        code = error.code or 500
+        message = {
+            400: "請求格式錯誤。",
+            404: "找不到這一筆",
+            405: "不支援此 HTTP 方法。",
+        }.get(code, error.description)
+
+        return json_response(code, message, None)
+
+    @app.get("/api/health")
+    def health_check():
+        return json_response(
+            200,
+            "伺服器運作正常，測試正常可以進行其他任務。",
+            {
+                "status": "ok",
+                "time": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    @app.get("/api/health/db")
+    def database_health_check():
+        try:
+            with db.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            current_app.logger.exception("Database health check failed")
+            return json_response(500, "資料庫暫時連不上", None)
+
+        return json_response(200, "資料庫連線正常", {"status": "ok"})
+
+    return app
 
 
-@app.get("/api/health")
-def health_check():
-    return json_response(
-        "success",
-        "服務運作中。",
-        {
-            "status": "running",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-        200,
-    )
-
-
-@app.get("/api/tasks")
-def get_tasks():
-    return json_response("success", "取得任務清單成功。", tasks, 200)
-
-
-@app.post("/api/tasks")
-def create_task():
-    payload = request.get_json(silent=True)
-
-    if not isinstance(payload, dict):
-        return json_response("error", "請提供合法的 JSON 物件。", None, 400)
-
-    title = payload.get("title")
-    if not isinstance(title, str) or not title.strip():
-        return json_response("error", "必填欄位 title 不可為空。", None, 400)
-
-    description = payload.get("description", "")
-    if not isinstance(description, str):
-        return json_response("error", "欄位 description 必須是字串。", None, 400)
-
-    task = {
-        "id": max((item["id"] for item in tasks), default=0) + 1,
-        "title": title.strip(),
-        "description": description,
-    }
-    tasks.append(task)
-
-    return json_response("success", "新增任務成功。", task, 201)
-
-
-@app.get("/api/tasks/<int:task_id>")
-def get_task(task_id):
-    task = next((item for item in tasks if item["id"] == task_id), None)
-
-    if task is None:
-        return json_response("error", "找不到指定任務。", None, 404)
-
-    return json_response("success", "取得任務成功。", task, 200)
+app = create_app()
 
 
 if __name__ == "__main__":
