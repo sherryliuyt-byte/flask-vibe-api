@@ -254,3 +254,287 @@ class DrawPrize(db.Model):
     tier = db.Column(db.String(20), nullable=False)
     matching_number = db.Column(db.String(), nullable=False)
     amount = db.Column(db.Numeric(), nullable=False)
+
+
+class Instrument(db.Model):
+    __tablename__ = "instruments"
+    __table_args__ = (
+        CheckConstraint(
+            "market IN ('tw_stock', 'us_stock', 'fund', 'other')",
+            name="ck_instruments_market",
+        ),
+        db.UniqueConstraint(
+            "market",
+            "symbol",
+            name="uq_instruments_market_symbol",
+        ),
+    )
+
+    id = db.Column(db.Integer, Identity(), primary_key=True)
+    market = db.Column(db.String(16), nullable=False)
+    symbol = db.Column(db.String(), nullable=False)
+    name = db.Column(db.String(), nullable=False)
+    currency = db.Column(db.String(3), nullable=False)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=func.now(),
+    )
+
+
+class Trade(db.Model):
+    __tablename__ = "trades"
+    __table_args__ = (
+        CheckConstraint(
+            "trade_type IN ('buy', 'sell', 'cash_dividend', "
+            "'stock_dividend', 'drip', 'split', 'merge', "
+            "'capital_reduction')",
+            name="ck_trades_trade_type",
+        ),
+        CheckConstraint(
+            "fee IS NULL OR fee >= 0",
+            name="ck_trades_fee_nonnegative",
+        ),
+        CheckConstraint(
+            "tax IS NULL OR tax >= 0",
+            name="ck_trades_tax_nonnegative",
+        ),
+        CheckConstraint(
+            "fx_rate_to_twd > 0",
+            name="ck_trades_fx_rate_to_twd_positive",
+        ),
+    )
+
+    id = db.Column(db.Integer, Identity(), primary_key=True)
+    instrument_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "instruments.id",
+            name="fk_trades_instrument_id_instruments",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    account_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "accounts.id",
+            name="fk_trades_account_id_accounts",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    trade_type = db.Column(db.String(24), nullable=False)
+    traded_on = db.Column(db.Date, nullable=False)
+    quantity = db.Column(db.Numeric())
+    price = db.Column(db.Numeric())
+    cash_amount = db.Column(db.Numeric())
+    ratio = db.Column(db.Numeric())
+    fee = db.Column(db.Numeric())
+    tax = db.Column(db.Numeric())
+    currency = db.Column(db.String(3), nullable=False)
+    fx_rate_to_twd = db.Column(db.Numeric(), nullable=False)
+    voided_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=func.now(),
+    )
+
+
+class IncomeCategory(db.Model):
+    __tablename__ = "income_categories"
+    __table_args__ = (
+        db.UniqueConstraint("name", name="uq_income_categories_name"),
+    )
+
+    id = db.Column(db.Integer, Identity(), primary_key=True)
+    name = db.Column(db.String(), nullable=False)
+    description = db.Column(db.Text)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=func.now(),
+    )
+
+
+class Income(db.Model):
+    __tablename__ = "incomes"
+    __table_args__ = (
+        CheckConstraint(
+            "amount > 0",
+            name="ck_incomes_amount_positive",
+        ),
+        CheckConstraint(
+            "fx_rate_to_twd > 0",
+            name="ck_incomes_fx_rate_to_twd_positive",
+        ),
+        CheckConstraint(
+            "NULLIF(BTRIM(source), '') IS NOT NULL "
+            "OR NULLIF(BTRIM(note), '') IS NOT NULL",
+            name="ck_incomes_source_or_note_present",
+        ),
+        db.UniqueConstraint("invoice_id", name="uq_incomes_invoice_id"),
+        db.UniqueConstraint("trade_id", name="uq_incomes_trade_id"),
+    )
+
+    id = db.Column(db.Integer, Identity(), primary_key=True)
+    received_on = db.Column(db.Date, nullable=False)
+    amount = db.Column(db.Numeric(), nullable=False)
+    currency = db.Column(db.String(3), nullable=False)
+    fx_rate_to_twd = db.Column(db.Numeric(), nullable=False)
+    category_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "income_categories.id",
+            name="fk_incomes_category_id_income_categories",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    account_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "accounts.id",
+            name="fk_incomes_account_id_accounts",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    source = db.Column(db.Text)
+    note = db.Column(db.Text)
+    invoice_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "invoices.id",
+            name="fk_incomes_invoice_id_invoices",
+            ondelete="RESTRICT",
+        ),
+    )
+    trade_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "trades.id",
+            name="fk_incomes_trade_id_trades",
+            ondelete="RESTRICT",
+        ),
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=func.now(),
+    )
+
+
+class ExpenseCategory(db.Model):
+    __tablename__ = "expense_categories"
+    __table_args__ = (
+        db.UniqueConstraint("name", name="uq_expense_categories_name"),
+    )
+
+    id = db.Column(db.Integer, Identity(), primary_key=True)
+    name = db.Column(db.String(), nullable=False)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=func.now(),
+    )
+
+
+class Expense(db.Model):
+    __tablename__ = "expenses"
+    __table_args__ = (
+        CheckConstraint(
+            "amount > 0",
+            name="ck_expenses_amount_positive",
+        ),
+        CheckConstraint(
+            "currency ~ '^[A-Z]{3}$'",
+            name="ck_expenses_currency_format",
+        ),
+        CheckConstraint(
+            "fx_rate_to_twd > 0",
+            name="ck_expenses_fx_rate_to_twd_positive",
+        ),
+        CheckConstraint(
+            "NULLIF(BTRIM(merchant), '') IS NOT NULL "
+            "OR NULLIF(BTRIM(note), '') IS NOT NULL",
+            name="ck_expenses_merchant_or_note_present",
+        ),
+    )
+
+    id = db.Column(db.Integer, Identity(), primary_key=True)
+    spent_on = db.Column(db.Date, nullable=False)
+    amount = db.Column(db.Numeric(), nullable=False)
+    currency = db.Column(db.String(3), nullable=False)
+    fx_rate_to_twd = db.Column(db.Numeric(), nullable=False)
+    category_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "expense_categories.id",
+            name="fk_expenses_category_id_expense_categories",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    account_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "accounts.id",
+            name="fk_expenses_account_id_accounts",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    merchant = db.Column(db.Text)
+    note = db.Column(db.Text)
+    invoice_id = db.Column(
+        db.Integer,
+        ForeignKey(
+            "invoices.id",
+            name="fk_expenses_invoice_id_invoices",
+            ondelete="RESTRICT",
+        ),
+    )
+    settled_on = db.Column(db.Date)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=func.now(),
+    )
