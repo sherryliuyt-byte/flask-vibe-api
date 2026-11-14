@@ -1,12 +1,12 @@
 import calendar
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, current_app, jsonify, request
+from flask import Flask, current_app, request
 from sqlalchemy import case, func, or_, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.engine import make_url
@@ -23,12 +23,38 @@ from models import (
     IncomeCategory,
     Invoice,
     InvoiceItem,
+    Instrument,
+    Trade,
     Transfer,
+)
+from utils import (
+    FULL_NUMBER_TIERS,
+    find_matching_prize,
+    has_text,
+    invoice_period_key,
+    json_response,
+    parse_currency,
+    parse_day,
+    parse_decimal,
+    parse_iso_date,
+    parse_iso_datetime,
+    period_date_range,
+    request_json_object,
+    serialize_account,
+    serialize_draw_prize,
+    serialize_expense,
+    serialize_expense_category,
+    serialize_income,
+    serialize_income_category,
+    serialize_instrument,
+    serialize_invoice,
+    serialize_invoice_item,
+    serialize_trade,
+    serialize_transfer,
 )
 
 
 ACCOUNT_KINDS = {"cash", "bank", "credit_card", "broker"}
-CURRENCY_PATTERN = re.compile(r"[A-Z]{3}")
 INVOICE_KINDS = {"paper", "electronic"}
 PRIZE_STATUSES = {"unchecked", "lost", "won", "claimed", "void"}
 DRAW_PRIZE_TIERS = {
@@ -42,253 +68,17 @@ DRAW_PRIZE_TIERS = {
     "sixth",
     "extra_sixth",
 }
-FULL_NUMBER_TIERS = {"special", "grand", "first"}
-
-
-def request_json_object():
-    payload = request.get_json(silent=True)
-    return payload if isinstance(payload, dict) else None
-
-
-def parse_decimal(value, field_name):
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise ValueError(f"{field_name}必須是數字。")
-
-    try:
-        parsed = Decimal(str(value))
-    except InvalidOperation as error:
-        raise ValueError(f"{field_name}格式不正確。") from error
-
-    if not parsed.is_finite():
-        raise ValueError(f"{field_name}必須是有限數值。")
-
-    return parsed
-
-
-def parse_currency(value):
-    if not isinstance(value, str) or CURRENCY_PATTERN.fullmatch(value) is None:
-        raise ValueError("幣別必須是三碼大寫英文字母。")
-
-    return value
-
-
-def parse_day(value, field_name):
-    if type(value) is not int or not 1 <= value <= 31:
-        raise ValueError(f"{field_name}必須是 1 到 31 的整數。")
-
-    return value
-
-
-def parse_iso_date(value, field_name="移轉日期"):
-    if (
-        not isinstance(value, str)
-        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None
-    ):
-        raise ValueError(f"{field_name}必須使用 YYYY-MM-DD 格式。")
-
-    try:
-        return date.fromisoformat(value)
-    except ValueError as error:
-        raise ValueError(f"{field_name}不是有效日期。") from error
-
-
-def has_text(value):
-    return isinstance(value, str) and bool(value.strip())
-
-
-def invoice_period_key(issued_on):
-    first_month = ((issued_on.month - 1) // 2) * 2 + 1
-    return f"{issued_on.year:04d}-{first_month:02d}"
-
-
-def period_date_range(period_key):
-    if not isinstance(period_key, str) or re.fullmatch(
-        r"[0-9]{4}-(01|03|05|07|09|11)",
-        period_key,
-    ) is None:
-        raise ValueError("期別必須是 YYYY-01、YYYY-03 等雙月期格式。")
-
-    year, month = (int(part) for part in period_key.split("-"))
-    try:
-        start = date(year, month, 1)
-    except ValueError as error:
-        raise ValueError("期別不是有效日期。") from error
-
-    if month == 11:
-        end = date(year, 12, 31)
-    else:
-        end = date(year, month + 2, 1) - timedelta(days=1)
-    return start, end
-
-
-def find_matching_prize(invoice_number, prizes):
-    invoice_digits = invoice_number[2:]
-    tier_order = {
-        "special": 0,
-        "grand": 1,
-        "first": 2,
-        "second": 3,
-        "third": 4,
-        "fourth": 5,
-        "fifth": 6,
-        "sixth": 7,
-        "extra_sixth": 8,
-    }
-    matches = []
-    for prize in prizes:
-        if prize.tier in FULL_NUMBER_TIERS:
-            is_match = invoice_digits == prize.matching_number
-        else:
-            is_match = invoice_digits.endswith(prize.matching_number)
-        if is_match:
-            matches.append(prize)
-
-    if not matches:
-        return None
-    return min(
-        matches,
-        key=lambda prize: (
-            tier_order[prize.tier],
-            -len(prize.matching_number),
-            prize.id,
-        ),
-    )
-
-
-def serialize_account(account):
-    return {
-        "id": account.id,
-        "name": account.name,
-        "kind": account.kind,
-        "currency": account.currency,
-        "opening_balance": str(account.opening_balance),
-        "statement_day": account.statement_day,
-        "payment_day": account.payment_day,
-        "created_at": account.created_at.isoformat(),
-        "updated_at": account.updated_at.isoformat(),
-    }
-
-
-def serialize_transfer(transfer):
-    return {
-        "id": transfer.id,
-        "transferred_on": transfer.transferred_on.isoformat(),
-        "amount": str(transfer.amount),
-        "currency": transfer.currency,
-        "fx_rate_to_twd": str(transfer.fx_rate_to_twd),
-        "from_account_id": transfer.from_account_id,
-        "to_account_id": transfer.to_account_id,
-        "note": transfer.note,
-        "created_at": transfer.created_at.isoformat(),
-        "updated_at": transfer.updated_at.isoformat(),
-    }
-
-
-def serialize_income_category(category):
-    return {
-        "id": category.id,
-        "name": category.name,
-        "description": category.description,
-        "created_at": category.created_at.isoformat(),
-        "updated_at": category.updated_at.isoformat(),
-    }
-
-
-def serialize_income(income):
-    return {
-        "id": income.id,
-        "received_on": income.received_on.isoformat(),
-        "amount": str(income.amount),
-        "currency": income.currency,
-        "fx_rate_to_twd": str(income.fx_rate_to_twd),
-        "category_id": income.category_id,
-        "account_id": income.account_id,
-        "source": income.source,
-        "note": income.note,
-        "invoice_id": income.invoice_id,
-        "created_at": income.created_at.isoformat(),
-        "updated_at": income.updated_at.isoformat(),
-    }
-
-
-def serialize_invoice(invoice):
-    return {
-        "id": invoice.id,
-        "number": invoice.number,
-        "issued_on": invoice.issued_on.isoformat(),
-        "amount": str(invoice.amount),
-        "kind": invoice.kind,
-        "currency": invoice.currency,
-        "fx_rate_to_twd": str(invoice.fx_rate_to_twd),
-        "random_code": invoice.random_code,
-        "seller_name": invoice.seller_name,
-        "seller_ban": invoice.seller_ban,
-        "prize_status": invoice.prize_status,
-        "created_at": invoice.created_at.isoformat(),
-        "updated_at": invoice.updated_at.isoformat(),
-    }
-
-
-def serialize_invoice_item(item):
-    return {
-        "id": item.id,
-        "invoice_id": item.invoice_id,
-        "name": item.name,
-        "quantity": str(item.quantity),
-        "unit_price": str(item.unit_price),
-        "line_amount": str(item.line_amount),
-        "created_at": item.created_at.isoformat(),
-        "updated_at": item.updated_at.isoformat(),
-    }
-
-
-def serialize_draw_prize(prize):
-    return {
-        "id": prize.id,
-        "draw_period_id": prize.draw_period_id,
-        "tier": prize.tier,
-        "matching_number": prize.matching_number,
-        "amount": str(prize.amount),
-    }
-
-
-def serialize_expense_category(category):
-    return {
-        "id": category.id,
-        "name": category.name,
-        "created_at": category.created_at.isoformat(),
-        "updated_at": category.updated_at.isoformat(),
-    }
-
-
-def serialize_expense(expense):
-    return {
-        "id": expense.id,
-        "spent_on": expense.spent_on.isoformat(),
-        "amount": str(expense.amount),
-        "currency": expense.currency,
-        "fx_rate_to_twd": str(expense.fx_rate_to_twd),
-        "category_id": expense.category_id,
-        "account_id": expense.account_id,
-        "merchant": expense.merchant,
-        "note": expense.note,
-        "invoice_id": expense.invoice_id,
-        "settled_on": (
-            expense.settled_on.isoformat() if expense.settled_on else None
-        ),
-        "created_at": expense.created_at.isoformat(),
-        "updated_at": expense.updated_at.isoformat(),
-    }
-
-
-def json_response(code, message, data):
-    return jsonify(
-        {
-            "code": code,
-            "message": message,
-            "data": data,
-        }
-    ), code
+INSTRUMENT_MARKETS = {"tw_stock", "us_stock", "fund", "other"}
+TRADE_TYPES = {
+    "buy",
+    "sell",
+    "cash_dividend",
+    "stock_dividend",
+    "drip",
+    "split",
+    "merge",
+    "capital_reduction",
+}
 
 
 def create_app():
@@ -696,6 +486,337 @@ def create_app():
             serialize_transfer(transfer),
         )
 
+    @app.get("/api/instruments")
+    def list_instruments():
+        instruments = Instrument.query.order_by(Instrument.id).all()
+        return json_response(
+            200,
+            "投資標的清單取得成功。",
+            [serialize_instrument(instrument) for instrument in instruments],
+        )
+
+    @app.post("/api/instruments")
+    def create_instrument():
+        payload = request_json_object()
+        if payload is None:
+            return json_response(400, "請提供有效的 JSON 物件。", None)
+
+        required_fields = ("market", "symbol", "name", "currency")
+        if any(
+            field not in payload or payload[field] is None
+            for field in required_fields
+        ):
+            return json_response(400, "市場、代號、名稱與幣別為必填。", None)
+
+        market = payload["market"]
+        if not isinstance(market, str) or market not in INSTRUMENT_MARKETS:
+            return json_response(400, "投資市場種類不正確。", None)
+
+        symbol = payload["symbol"]
+        name = payload["name"]
+        if not isinstance(symbol, str) or not symbol.strip():
+            return json_response(400, "投資標的代號不可為空。", None)
+        if not isinstance(name, str) or not name.strip():
+            return json_response(400, "投資標的名稱不可為空。", None)
+        try:
+            currency = parse_currency(payload["currency"])
+        except ValueError as error:
+            return json_response(400, str(error), None)
+
+        symbol = symbol.strip()
+        name = name.strip()
+        if db.session.query(Instrument.id).filter(
+            Instrument.market == market,
+            Instrument.symbol == symbol,
+        ).first():
+            return json_response(400, "此市場已有相同的投資標的代號。", None)
+
+        instrument = Instrument(
+            market=market,
+            symbol=symbol,
+            name=name,
+            currency=currency,
+        )
+        db.session.add(instrument)
+        db.session.flush()
+        db.session.refresh(instrument)
+        data = serialize_instrument(instrument)
+        db.session.commit()
+
+        return json_response(201, "投資標的新增成功。", data)
+
+    @app.get("/api/instruments/<int:instrument_id>")
+    def get_instrument(instrument_id):
+        instrument = db.session.get(Instrument, instrument_id)
+        if instrument is None:
+            return json_response(404, "找不到這個投資標的。", None)
+
+        return json_response(
+            200,
+            "投資標的資料取得成功。",
+            serialize_instrument(instrument),
+        )
+
+    @app.patch("/api/instruments/<int:instrument_id>")
+    def update_instrument(instrument_id):
+        payload = request_json_object()
+        if payload is None:
+            return json_response(400, "請提供有效的 JSON 物件。", None)
+
+        instrument = db.session.get(Instrument, instrument_id)
+        if instrument is None:
+            return json_response(404, "找不到這個投資標的。", None)
+
+        updates = {}
+        for field, label in (("market", "市場"), ("symbol", "代號"), ("name", "名稱")):
+            if field not in payload:
+                continue
+            value = payload[field]
+            if not isinstance(value, str) or not value.strip():
+                return json_response(400, f"投資標的{label}不可為空。", None)
+            if field == "market" and value not in INSTRUMENT_MARKETS:
+                return json_response(400, "投資市場種類不正確。", None)
+            updates[field] = value.strip()
+
+        if "currency" in payload:
+            try:
+                updates["currency"] = parse_currency(payload["currency"])
+            except ValueError as error:
+                return json_response(400, str(error), None)
+
+        if not updates:
+            return json_response(400, "請提供至少一個可更新欄位。", None)
+
+        market = updates.get("market", instrument.market)
+        symbol = updates.get("symbol", instrument.symbol)
+        if db.session.query(Instrument.id).filter(
+            Instrument.market == market,
+            Instrument.symbol == symbol,
+            Instrument.id != instrument_id,
+        ).first():
+            return json_response(400, "此市場已有相同的投資標的代號。", None)
+
+        for field, value in updates.items():
+            setattr(instrument, field, value)
+        instrument.updated_at = func.now()
+
+        db.session.flush()
+        db.session.refresh(instrument)
+        data = serialize_instrument(instrument)
+        db.session.commit()
+
+        return json_response(200, "投資標的更新成功。", data)
+
+    @app.get("/api/trades")
+    def list_trades():
+        trades = Trade.query.order_by(Trade.id).all()
+        return json_response(
+            200,
+            "投資交易清單取得成功。",
+            [serialize_trade(trade) for trade in trades],
+        )
+
+    @app.post("/api/trades")
+    def create_trade():
+        payload = request_json_object()
+        if payload is None:
+            return json_response(400, "請提供有效的 JSON 物件。", None)
+
+        required_fields = (
+            "instrument_id",
+            "account_id",
+            "trade_type",
+            "traded_on",
+            "currency",
+            "fx_rate_to_twd",
+        )
+        if any(
+            field not in payload or payload[field] is None
+            for field in required_fields
+        ):
+            return json_response(400, "投資交易的必填欄位不可缺少或為空。", None)
+
+        try:
+            instrument_id = payload["instrument_id"]
+            account_id = payload["account_id"]
+            if type(instrument_id) is not int or type(account_id) is not int:
+                raise ValueError("投資標的與帳戶編號必須是整數。")
+
+            trade_type = payload["trade_type"]
+            if not isinstance(trade_type, str) or trade_type not in TRADE_TYPES:
+                raise ValueError("投資交易種類不正確。")
+
+            traded_on = parse_iso_date(payload["traded_on"], "交易日期")
+            currency = parse_currency(payload["currency"])
+            fx_rate_to_twd = parse_decimal(
+                payload["fx_rate_to_twd"],
+                "台幣匯率",
+            )
+            if fx_rate_to_twd <= 0:
+                raise ValueError("台幣匯率必須大於 0。")
+
+            numeric_values = {}
+            for field, label in (
+                ("quantity", "數量"),
+                ("price", "價格"),
+                ("cash_amount", "現金金額"),
+                ("ratio", "比例"),
+                ("fee", "手續費"),
+                ("tax", "交易稅"),
+            ):
+                value = payload.get(field)
+                if value is not None:
+                    value = parse_decimal(value, label)
+                    if field in {"fee", "tax"} and value < 0:
+                        raise ValueError(f"{label}不可小於 0。")
+                numeric_values[field] = value
+
+            voided_at = payload.get("voided_at")
+            if voided_at is not None:
+                voided_at = parse_iso_datetime(voided_at, "作廢時間")
+        except ValueError as error:
+            return json_response(400, str(error), None)
+
+        instrument = db.session.get(Instrument, instrument_id)
+        account = db.session.get(Account, account_id)
+        if instrument is None:
+            return json_response(400, "指定的投資標的不存在。", None)
+        if account is None:
+            return json_response(400, "指定的帳戶不存在。", None)
+        if account.currency != currency:
+            return json_response(400, "交易幣別必須與帳戶幣別相同。", None)
+
+        trade = Trade(
+            instrument_id=instrument_id,
+            account_id=account_id,
+            trade_type=trade_type,
+            traded_on=traded_on,
+            currency=currency,
+            fx_rate_to_twd=fx_rate_to_twd,
+            voided_at=voided_at,
+            **numeric_values,
+        )
+        db.session.add(trade)
+        db.session.flush()
+        db.session.refresh(trade)
+        data = serialize_trade(trade)
+        db.session.commit()
+
+        return json_response(201, "投資交易新增成功。", data)
+
+    @app.get("/api/trades/<int:trade_id>")
+    def get_trade(trade_id):
+        trade = db.session.get(Trade, trade_id)
+        if trade is None:
+            return json_response(404, "找不到這筆投資交易。", None)
+
+        return json_response(
+            200,
+            "投資交易資料取得成功。",
+            serialize_trade(trade),
+        )
+
+    @app.patch("/api/trades/<int:trade_id>")
+    def update_trade(trade_id):
+        payload = request_json_object()
+        if payload is None:
+            return json_response(400, "請提供有效的 JSON 物件。", None)
+
+        trade = db.session.get(Trade, trade_id)
+        if trade is None:
+            return json_response(404, "找不到這筆投資交易。", None)
+
+        updates = {}
+        try:
+            for field, label in (
+                ("instrument_id", "投資標的編號"),
+                ("account_id", "帳戶編號"),
+            ):
+                if field not in payload:
+                    continue
+                value = payload[field]
+                if type(value) is not int:
+                    raise ValueError(f"{label}必須是整數。")
+                updates[field] = value
+
+            if "trade_type" in payload:
+                value = payload["trade_type"]
+                if not isinstance(value, str) or value not in TRADE_TYPES:
+                    raise ValueError("投資交易種類不正確。")
+                updates["trade_type"] = value
+
+            if "traded_on" in payload:
+                updates["traded_on"] = parse_iso_date(
+                    payload["traded_on"],
+                    "交易日期",
+                )
+
+            if "currency" in payload:
+                updates["currency"] = parse_currency(payload["currency"])
+
+            if "fx_rate_to_twd" in payload:
+                fx_rate_to_twd = parse_decimal(
+                    payload["fx_rate_to_twd"],
+                    "台幣匯率",
+                )
+                if fx_rate_to_twd <= 0:
+                    raise ValueError("台幣匯率必須大於 0。")
+                updates["fx_rate_to_twd"] = fx_rate_to_twd
+
+            for field, label in (
+                ("quantity", "數量"),
+                ("price", "價格"),
+                ("cash_amount", "現金金額"),
+                ("ratio", "比例"),
+                ("fee", "手續費"),
+                ("tax", "交易稅"),
+            ):
+                if field not in payload:
+                    continue
+                value = payload[field]
+                if value is None:
+                    updates[field] = None
+                    continue
+                value = parse_decimal(value, label)
+                if field in {"fee", "tax"} and value < 0:
+                    raise ValueError(f"{label}不可小於 0。")
+                updates[field] = value
+
+            if "voided_at" in payload:
+                value = payload["voided_at"]
+                updates["voided_at"] = (
+                    parse_iso_datetime(value, "作廢時間")
+                    if value is not None
+                    else None
+                )
+        except ValueError as error:
+            return json_response(400, str(error), None)
+
+        if not updates:
+            return json_response(400, "請提供至少一個可更新欄位。", None)
+
+        instrument_id = updates.get("instrument_id", trade.instrument_id)
+        account_id = updates.get("account_id", trade.account_id)
+        currency = updates.get("currency", trade.currency)
+        if db.session.get(Instrument, instrument_id) is None:
+            return json_response(400, "指定的投資標的不存在。", None)
+        account = db.session.get(Account, account_id)
+        if account is None:
+            return json_response(400, "指定的帳戶不存在。", None)
+        if account.currency != currency:
+            return json_response(400, "交易幣別必須與帳戶幣別相同。", None)
+
+        for field, value in updates.items():
+            setattr(trade, field, value)
+        trade.updated_at = func.now()
+
+        db.session.flush()
+        db.session.refresh(trade)
+        data = serialize_trade(trade)
+        db.session.commit()
+
+        return json_response(200, "投資交易更新成功。", data)
+
     @app.get("/api/income-categories")
     def list_income_categories():
         categories = IncomeCategory.query.order_by(IncomeCategory.id).all()
@@ -891,6 +1012,10 @@ def create_app():
             invoice_id = payload.get("invoice_id")
             if invoice_id is not None and type(invoice_id) is not int:
                 raise ValueError("發票編號必須是整數或 null。")
+
+            trade_id = payload.get("trade_id")
+            if trade_id is not None and type(trade_id) is not int:
+                raise ValueError("投資交易編號必須是整數或 null。")
         except ValueError as error:
             return json_response(400, str(error), None)
 
@@ -911,6 +1036,14 @@ def create_app():
             ).first():
                 return json_response(400, "這張發票已連結入帳。", None)
 
+        if trade_id is not None:
+            if db.session.get(Trade, trade_id) is None:
+                return json_response(400, "指定的投資交易不存在。", None)
+            if db.session.query(Income.id).filter(
+                Income.trade_id == trade_id
+            ).first():
+                return json_response(400, "這筆投資交易已連結入帳。", None)
+
         income = Income(
             received_on=received_on,
             amount=amount,
@@ -921,6 +1054,7 @@ def create_app():
             source=source,
             note=note,
             invoice_id=invoice_id,
+            trade_id=trade_id,
         )
         db.session.add(income)
         db.session.flush()
@@ -959,10 +1093,16 @@ def create_app():
                 ("currency", "幣別"),
                 ("source", "來源"),
                 ("note", "備註"),
+                ("trade_id", "投資交易編號"),
             ):
                 if field not in payload:
                     continue
                 value = payload[field]
+                if field == "trade_id":
+                    if value is not None and type(value) is not int:
+                        raise ValueError("投資交易編號必須是整數或 null。")
+                    updates[field] = value
+                    continue
                 if value is None and field in {"source", "note"}:
                     continue
                 if value is None:
@@ -994,6 +1134,7 @@ def create_app():
         category_id = updates.get("category_id", income.category_id)
         account_id = updates.get("account_id", income.account_id)
         currency = updates.get("currency", income.currency)
+        trade_id = updates.get("trade_id", income.trade_id)
         if "category_id" in updates and db.session.get(
             IncomeCategory,
             category_id,
@@ -1007,6 +1148,15 @@ def create_app():
                 return json_response(400, "指定的帳戶不存在。", None)
         if account is not None and account.currency != currency:
             return json_response(400, "入帳幣別必須與帳戶幣別相同。", None)
+
+        if "trade_id" in updates and trade_id is not None:
+            if db.session.get(Trade, trade_id) is None:
+                return json_response(400, "指定的投資交易不存在。", None)
+            if db.session.query(Income.id).filter(
+                Income.trade_id == trade_id,
+                Income.id != income_id,
+            ).first():
+                return json_response(400, "這筆投資交易已連結入帳。", None)
 
         source = updates.get("source", income.source)
         note = updates.get("note", income.note)
