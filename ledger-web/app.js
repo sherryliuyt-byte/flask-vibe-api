@@ -146,6 +146,7 @@
           <p class="connection-note">只儲存後端網址，不需要會員帳號或金鑰。</p>
         </section>
       </main>`;
+    document.title = "日常記帳｜連線";
 
     document.querySelector("#connect-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -193,6 +194,15 @@
     return new Intl.NumberFormat("zh-TW", {
       maximumFractionDigits: 2,
     }).format(amount);
+  }
+
+  function readValue(source, keys) {
+    if (typeof source === "number" || typeof source === "string") return source;
+    if (!source || typeof source !== "object") return undefined;
+    for (const key of keys) {
+      if (source[key] !== undefined && source[key] !== null) return source[key];
+    }
+    return undefined;
   }
 
   function formatDate(value) {
@@ -357,7 +367,7 @@
             <label for="entry-category">${isIncome ? "入帳分類" : "花費分類"}</label>
             ${categories?.length
               ? `<select id="entry-category" name="category_id" required>
-                  ${categories.map((category) => `<option value="${category.id}">${escapeHtml(category.name)}</option>`).join("")}
+                  ${categories.map((category) => `<option value="${escapeHtml(category.id)}">${escapeHtml(category.name)}</option>`).join("")}
                 </select>`
               : `<input id="entry-category" name="category_name" placeholder="例如：${isIncome ? "薪資" : "餐飲"}" required>
                  <p class="input-hint">目前沒有分類，送出時會先建立此分類。</p>`}
@@ -365,7 +375,7 @@
           <div class="field">
             <label for="entry-account">帳戶</label>
             <select id="entry-account" name="account_id" required ${accounts?.length ? "" : "disabled"}>
-              ${(accounts || []).map((account) => `<option value="${account.id}" data-currency="${escapeHtml(account.currency || "TWD")}">${escapeHtml(account.name)} · ${escapeHtml(account.currency || "TWD")}</option>`).join("")}
+              ${(accounts || []).map((account) => `<option value="${escapeHtml(account.id)}" data-currency="${escapeHtml(account.currency || "TWD")}">${escapeHtml(account.name)} · ${escapeHtml(account.currency || "TWD")}</option>`).join("")}
             </select>
           </div>
           <div class="field">
@@ -396,7 +406,7 @@
                 <label for="entry-note">備註（選填）</label>
                 <input id="entry-note" name="note" placeholder="補充說明">
               </div>`}
-          <button class="primary-button full-width" type="submit" ${accounts?.length ? "" : "disabled"}>
+          <button class="primary-button full-width" type="submit" ${accounts?.length && !categoryError ? "" : "disabled"}>
             新增${isIncome ? "入帳" : "花費"}
           </button>
         </div>
@@ -448,8 +458,27 @@
                 const quoteResult = state.pageData.quotes?.[instrument.id];
                 const holdingError = state.pageData.holdingErrors?.[instrument.id];
                 const quoteError = state.pageData.quoteErrors?.[instrument.id];
-                const holding = holdingResult?.quantity ?? holdingResult?.holding ?? holdingResult?.shares;
-                const quote = quoteResult?.price ?? quoteResult?.latest_price ?? quoteResult?.close;
+                const holdingLoaded = Object.prototype.hasOwnProperty.call(
+                  state.pageData.holdings || {},
+                  instrument.id,
+                );
+                const quoteLoaded = Object.prototype.hasOwnProperty.call(
+                  state.pageData.quotes || {},
+                  instrument.id,
+                );
+                const holding = readValue(holdingResult, [
+                  "quantity",
+                  "holding",
+                  "shares",
+                  "holding_quantity",
+                  "held_quantity",
+                ]);
+                const quote = readValue(quoteResult, [
+                  "price",
+                  "latest_price",
+                  "close",
+                  "close_price",
+                ]);
                 return `<article class="investment-card">
                   <div class="investment-top">
                     <div class="row-primary">
@@ -461,12 +490,12 @@
                   <div class="investment-stats">
                     <div class="investment-stat">
                       <span class="muted">持有數量</span>
-                      <strong>${holding === undefined ? (holdingError ? "—" : "載入中") : formatAmount(holding)}</strong>
+                      <strong>${holdingError ? "—" : !holdingLoaded ? "載入中" : holding === undefined ? "—" : formatAmount(holding)}</strong>
                       ${holdingError ? `<p class="inline-error">${escapeHtml(holdingError)}</p>` : ""}
                     </div>
                     <div class="investment-stat">
                       <span class="muted">最新報價</span>
-                      <strong>${quoteResult == null ? "還沒有報價" : quote === undefined ? (quoteError ? "—" : "載入中") : formatAmount(quote)}</strong>
+                      <strong>${quoteError ? "—" : !quoteLoaded ? "載入中" : quote === undefined ? "還沒有報價" : formatAmount(quote)}</strong>
                       ${quoteError ? `<p class="inline-error">${escapeHtml(quoteError)}</p>` : ""}
                     </div>
                   </div>
@@ -786,13 +815,6 @@
       state.pageData.invoiceError = error.message;
     }
     renderShell();
-  }
-
-  async function loadActivePage() {
-    if (state.activeTab === "home") return loadHome();
-    if (state.activeTab === "ledger") return loadLedger();
-    if (state.activeTab === "investments") return loadInvestments();
-    if (state.activeTab === "invoices") return loadInvoices();
   }
 
   async function enterApp() {
