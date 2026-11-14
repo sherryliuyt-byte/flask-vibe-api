@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, pool
 from sqlalchemy.engine import make_url
 
-from extensions import db
+import models
 
 
 config = context.config
@@ -32,7 +32,7 @@ config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = db.metadata
+target_metadata = models.db.metadata
 
 
 def run_migrations_offline():
