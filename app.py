@@ -4,6 +4,7 @@ import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from flask import Flask, current_app, request
@@ -102,6 +103,61 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     db.init_app(app)
+
+    configured_web_origin = os.environ.get("WEB_ORIGIN", "").strip().rstrip("/")
+
+    def is_allowed_origin(origin):
+        if not origin:
+            return False
+        if configured_web_origin and origin.rstrip("/") == configured_web_origin:
+            return True
+
+        parsed_origin = urlsplit(origin)
+        return (
+            parsed_origin.scheme == "http"
+            and parsed_origin.hostname in {"127.0.0.1", "localhost"}
+            and not parsed_origin.username
+            and not parsed_origin.password
+            and not parsed_origin.path
+            and not parsed_origin.query
+            and not parsed_origin.fragment
+        )
+
+    @app.before_request
+    def handle_cors_preflight():
+        if request.method == "OPTIONS" and request.headers.get("Origin"):
+            return "", 204
+        return None
+
+    @app.after_request
+    def add_cors_headers(response):
+        origin = request.headers.get("Origin")
+        if is_allowed_origin(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = (
+                "GET, POST, PATCH, OPTIONS"
+            )
+            requested_headers = request.headers.get(
+                "Access-Control-Request-Headers"
+            )
+            if requested_headers is not None:
+                response.headers["Access-Control-Allow-Headers"] = (
+                    requested_headers
+                )
+
+        vary_values = [
+            value.strip()
+            for value in response.headers.get("Vary", "").split(",")
+            if value.strip()
+        ]
+        if not any(value.lower() == "origin" for value in vary_values):
+            vary_values.append("Origin")
+        response.headers["Vary"] = ", ".join(vary_values)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate"
+        )
+        return response
 
     @app.errorhandler(HTTPException)
     def handle_http_exception(error):
