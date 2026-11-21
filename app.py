@@ -104,12 +104,19 @@ def create_app():
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     db.init_app(app)
 
-    configured_web_origin = os.environ.get("WEB_ORIGIN", "").strip().rstrip("/")
+    configured_web_origins = os.environ.get("WEB_ORIGIN", "").strip()
+    if not configured_web_origins:
+        configured_web_origins = os.environ.get("WEB_ORGIN", "").strip()
+    configured_web_origins = {
+        origin.strip().rstrip("/")
+        for origin in configured_web_origins.split(",")
+        if origin.strip()
+    }
 
     def is_allowed_origin(origin):
         if not origin:
             return False
-        if configured_web_origin and origin.rstrip("/") == configured_web_origin:
+        if origin.rstrip("/") in configured_web_origins:
             return True
 
         parsed_origin = urlsplit(origin)
